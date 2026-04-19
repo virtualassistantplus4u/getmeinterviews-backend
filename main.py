@@ -17,11 +17,16 @@ app = FastAPI(title="GetMeInterviews API", version="1.0.0")
 
 # ── CORS ──────────────────────────────────────────────────────
 app.add_middleware(
-CORSMiddleware,
-allow_origins=["*"],
-allow_credentials=False,
-allow_methods=["*"],
-allow_headers=["*"],
+    CORSMiddleware,
+    allow_origins=[
+        os.getenv("FRONTEND_URL", "http://localhost:3000"),
+        "https://get-me-interviews.vercel.app",
+        "https://getmeinterviews.com",
+        "https://www.getmeinterviews.com",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ── Plan limits ───────────────────────────────────────────────
