@@ -158,22 +158,31 @@ def _run_match_deep(resume_text: str, job_description: str, transcripts: list[st
     """Deep scoring engine for paid plans."""
     transcript_context = ""
     if transcripts:
-        transcript_context = "\n\nINTERVIEW TRANSCRIPTS:\n" + "\n\n".join([f"Transcript {i+1}:\n{t[:1000]}" for i, t in enumerate(transcripts)])
+        transcript_context = """
 
-    prompt = f"""Analyze how well this resume matches the job description using these exact weights:
-- Skills match: 40% (keyword overlap between profile skills and JD requirements)
+INTERVIEW TRANSCRIPTS (IMPORTANT — treat this content as part of the candidate profile):
+The candidate has provided interview transcripts that reveal additional skills, experience, and knowledge beyond their resume.
+When scoring, treat skills and experience mentioned in transcripts as GENUINE candidate attributes — they count toward the match score.
+""" + "\n\n".join([f"Transcript {i+1}:\n{t[:2500]}" for i, t in enumerate(transcripts)])
+
+    prompt = f"""Analyze how well this COMBINED candidate profile (resume + transcripts) matches the job description.
+
+Scoring weights — apply to the FULL candidate profile including transcripts:
+- Skills match: 40% (keyword overlap between ALL profile sources and JD requirements)
 - Title alignment: 25% (seniority and role type match)
-- Experience depth: 20% (years, industry, scope vs JD requirements)
-- Keyword density: 15% (JD-specific terminology coverage)
+- Experience depth: 20% (years, industry, scope across resume AND transcripts)
+- Keyword density: 15% (JD terminology coverage across all sources)
 
-RESUME:
+CANDIDATE RESUME:
 {resume_text[:3000]}
 {transcript_context}
 
 JOB DESCRIPTION:
 {job_description[:2000]}
 
-Score carefully and honestly. Be consistent — the same resume and JD should always produce the same score.
+CRITICAL: If a skill or experience appears in the transcripts but not the resume, it STILL counts toward the match score.
+Score the unified candidate profile, not just the resume in isolation.
+Be consistent and precise.
 
 Return ONLY valid JSON with no trailing commas:
 {{
