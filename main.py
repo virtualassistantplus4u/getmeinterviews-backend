@@ -10,7 +10,7 @@ load_dotenv()
 
 from lib.auth import get_current_user
 from lib.text_extractor import extract_text
-from lib.claude_agent import run_jd_match, generate_resume, generate_gap_questions, reanalyze_with_answers
+from lib.ai_engine import run_jd_match, generate_resume, generate_gap_questions, reanalyze_with_answers
 from lib.docx_generator import generate_docx
 
 app = FastAPI(title="GetMeInterviews API", version="1.0.0")
