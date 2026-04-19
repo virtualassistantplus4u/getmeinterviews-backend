@@ -10,7 +10,7 @@ load_dotenv()
 
 from lib.auth import get_current_user
 from lib.text_extractor import extract_text
-from lib.claude_agent import run_jd_match, generate_resume
+from lib.claude_agent import run_jd_match, generate_resume, generate_gap_questions, reanalyze_with_answers
 from lib.docx_generator import generate_docx
 
 app = FastAPI(title="GetMeInterviews API", version="1.0.0")
@@ -370,3 +370,66 @@ async def get_files(ctx: dict = Depends(get_current_user)):
         "resume": resume_res.data[0] if resume_res.data else None,
         "transcripts": transcripts_res.data or [],
     }
+
+# ── Admin: Gap Questions ──────────────────────────────────────
+class GapQuestionsRequest(BaseModel):
+    job_description: str
+    match_data: dict
+
+
+@app.post("/api/admin/gap-questions")
+async def admin_gap_questions(
+    body: GapQuestionsRequest,
+    ctx: dict = Depends(get_current_user)
+):
+    profile = ctx["profile"]
+    if profile.get("plan") != "admin":
+        raise HTTPException(status_code=403, detail="This feature is only available on the Admin plan.")
+
+    supabase = ctx["supabase"]
+    user_id = profile["id"]
+
+    resume_res = supabase.table("resumes")        .select("raw_text")        .eq("user_id", user_id)        .eq("is_master", True)        .single()        .execute()
+
+    if not resume_res.data:
+        raise HTTPException(status_code=404, detail="No master resume found.")
+
+    result = generate_gap_questions(
+        resume_text=resume_res.data["raw_text"],
+        job_description=body.job_description,
+        match_data=body.match_data,
+    )
+    return result
+
+
+# ── Admin: Reanalyze with Answers ─────────────────────────────
+class ReanalyzeRequest(BaseModel):
+    job_description: str
+    original_match: dict
+    answers: list[dict]
+
+
+@app.post("/api/admin/reanalyze")
+async def admin_reanalyze(
+    body: ReanalyzeRequest,
+    ctx: dict = Depends(get_current_user)
+):
+    profile = ctx["profile"]
+    if profile.get("plan") != "admin":
+        raise HTTPException(status_code=403, detail="This feature is only available on the Admin plan.")
+
+    supabase = ctx["supabase"]
+    user_id = profile["id"]
+
+    resume_res = supabase.table("resumes")        .select("raw_text")        .eq("user_id", user_id)        .eq("is_master", True)        .single()        .execute()
+
+    if not resume_res.data:
+        raise HTTPException(status_code=404, detail="No master resume found.")
+
+    result = reanalyze_with_answers(
+        resume_text=resume_res.data["raw_text"],
+        job_description=body.job_description,
+        original_match=body.original_match,
+        answers=body.answers,
+    )
+    return result

@@ -254,3 +254,159 @@ Return this exact JSON with no trailing commas:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Claude API error during generation: {str(e)}")
+
+
+# ── Admin: Generate Gap Questions ─────────────────────────────────────────────
+
+def generate_gap_questions(
+    resume_text: str,
+    job_description: str,
+    match_data: dict,
+) -> dict:
+    """
+    For admin plan only. When score < 80%, generate targeted questions
+    the admin can ask the candidate to surface hidden experience that
+    could push the match score above 80%.
+    """
+    missing = match_data.get("missing", [])
+    partial = match_data.get("partial", [])
+    cats = match_data.get("cats", {})
+    overall = match_data.get("overall", 0)
+    role = match_data.get("role", "this role")
+
+    prompt = f"""A candidate's resume scores {overall}% against a job description for {role}. The threshold is 80%.
+
+RESUME (excerpt):
+{resume_text[:2000]}
+
+JOB DESCRIPTION (excerpt):
+{job_description[:1500]}
+
+MISSING KEYWORDS: {', '.join(missing[:12])}
+PARTIAL MATCHES: {', '.join(partial[:8])}
+WEAK CATEGORIES: {', '.join([k for k, v in cats.items() if v < 75])}
+
+Generate targeted interview questions an admin can ask the candidate RIGHT NOW to surface hidden experience, projects, or skills that could close the gap to 80%+.
+
+Rules:
+- Questions must directly target the missing keywords and weak categories
+- Each question should be specific enough that a "yes" answer with detail would meaningfully improve the match score
+- Frame questions as conversational, not interrogative
+- Include what a favorable answer would look like
+
+Return ONLY valid JSON with no trailing commas:
+{{
+  "gap_summary": "One sentence explaining the main gap between the resume and JD.",
+  "points_needed": {80 - overall},
+  "questions": [
+    {{
+      "id": 1,
+      "category": "Skills",
+      "question": "Have you worked with [missing keyword] in any capacity, even in a personal project or supporting role?",
+      "targets": ["missing_keyword"],
+      "favorable_answer": "Yes, with specific examples of usage or implementation.",
+      "points_if_favorable": 5
+    }}
+  ],
+  "coaching_note": "One sentence of advice for the admin on how to use these answers."
+}}
+
+Generate 5-8 questions. Total points_if_favorable across all questions should be enough to reach 80% if answered favorably."""
+
+    try:
+        response = get_client().messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=2000,
+            system="You are an expert resume coach and talent consultant. Return ONLY valid JSON with no trailing commas or markdown.",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = response.content[0].text.strip()
+        return clean_and_parse_json(raw)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate gap questions: {str(e)}")
+
+
+# ── Admin: Re-analyze with Candidate Answers ──────────────────────────────────
+
+def reanalyze_with_answers(
+    resume_text: str,
+    job_description: str,
+    original_match: dict,
+    answers: list[dict],
+) -> dict:
+    """
+    Re-score the match incorporating the candidate's verbal answers.
+    Answers can surface experience not in the resume.
+    """
+    answers_text = "\n".join([
+        f"Q: {a.get('question', '')}\nA: {a.get('answer', '')}"
+        for a in answers if a.get('answer', '').strip()
+    ])
+
+    prompt = f"""Re-analyze a candidate's match score after they answered clarifying questions.
+
+ORIGINAL RESUME:
+{resume_text[:2000]}
+
+JOB DESCRIPTION:
+{job_description[:1500]}
+
+ORIGINAL SCORE: {original_match.get('overall')}%
+ORIGINAL MISSING: {', '.join(original_match.get('missing', [])[:12])}
+
+CANDIDATE'S ANSWERS TO GAP QUESTIONS:
+{answers_text}
+
+Instructions:
+- Re-score the match incorporating the verbal answers as supplementary evidence
+- If answers confirm relevant experience, increase scores accordingly
+- Be honest — only increase scores for genuinely relevant answers
+- The answers can be used to inform the resume summary and bullets but must not fabricate experience
+- Return updated match data with the same structure as before
+
+Return ONLY valid JSON:
+{{
+  "overall": <updated int 0-100>,
+  "pass": <true if overall >= 80>,
+  "role": "{original_match.get('role', '')}",
+  "company": "{original_match.get('company', '') or ''}",
+  "cats": {{
+    "skills": <int>,
+    "title": <int>,
+    "experience": <int>,
+    "keywords": <int>
+  }},
+  "matched": ["keyword1", "keyword2"],
+  "missing": ["remaining_gap1"],
+  "partial": ["partial1"],
+  "tips": ["tip1", "tip2"],
+  "section_analysis": [
+    {{"name": "Summary", "note": "...", "status": "ok"}}
+  ],
+  "improvements": [
+    {{
+      "cat": "Keywords to add",
+      "title": "Add keyword from verbal answer",
+      "detail": "Candidate confirmed experience with this in their answer.",
+      "where": "Skills section and relevant bullets."
+    }}
+  ],
+  "answer_insights": "One sentence summarizing what the answers revealed.",
+  "score_delta": <int, how many points were added>
+}}"""
+
+    try:
+        response = get_client().messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=2500,
+            system="You are an expert ATS analyst and resume coach. Return ONLY valid JSON with no trailing commas or markdown.",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = response.content[0].text.strip()
+        return clean_and_parse_json(raw)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to reanalyze with answers: {str(e)}")
