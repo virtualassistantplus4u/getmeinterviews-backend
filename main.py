@@ -34,6 +34,7 @@ PLAN_LIMITS = {
     "free":      {"monthly_resumes": 3,       "transcripts": 0, "daily_jd_matches": 3},
     "pro":       {"monthly_resumes": 20,      "transcripts": 1, "daily_jd_matches": 10},
     "unlimited": {"monthly_resumes": 999999,  "transcripts": 5, "daily_jd_matches": 999999},
+    "admin":     {"monthly_resumes": 999999,  "transcripts": 999999, "daily_jd_matches": 999999},
 }
 
 
