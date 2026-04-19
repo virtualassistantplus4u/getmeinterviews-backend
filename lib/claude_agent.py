@@ -9,6 +9,72 @@ def get_client():
     return anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 
+def clean_and_parse_json(raw: str) -> dict:
+    """Robustly parse JSON from Claude's response."""
+    # Remove markdown fences
+    raw = re.sub(r"```json\s*", "", raw)
+    raw = re.sub(r"```\s*", "", raw)
+    raw = raw.strip()
+
+    # Try direct parse first
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    # Find the outermost { ... } block
+    start = raw.find("{")
+    if start == -1:
+        raise HTTPException(status_code=500, detail="No JSON object found in Claude response.")
+
+    # Walk through to find matching closing brace
+    depth = 0
+    end = -1
+    in_string = False
+    escape_next = False
+    for i, ch in enumerate(raw[start:], start):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        if ch == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+
+    if end == -1:
+        raise HTTPException(status_code=500, detail="Could not find complete JSON in Claude response.")
+
+    candidate = raw[start:end]
+
+    # Try parsing the extracted block
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        pass
+
+    # Last resort: fix common Claude JSON issues
+    # Remove trailing commas before } or ]
+    candidate = re.sub(r",\s*([}\]])", r"\1", candidate)
+    # Fix unescaped newlines inside strings
+    candidate = re.sub(r'(?<!\\)\n', ' ', candidate)
+
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse Claude response as JSON: {str(e)}")
+
+
 # ── JD Match Analysis ─────────────────────────────────────────────────────────
 
 def run_jd_match(
@@ -16,10 +82,6 @@ def run_jd_match(
     job_description: str,
     transcripts: list[str] = []
 ) -> dict:
-    """
-    Analyze how well a resume matches a job description.
-    Returns match score, keywords, gaps, and improvement suggestions.
-    """
     client = get_client()
 
     transcript_context = ""
@@ -27,7 +89,7 @@ def run_jd_match(
         transcript_context = "\n\nINTERVIEW TRANSCRIPTS (for context only):\n" + \
             "\n\n".join([f"Transcript {i+1}:\n{t[:1000]}" for i, t in enumerate(transcripts)])
 
-    prompt = f"""Analyze how well this resume matches the job description. Return ONLY a raw JSON object — no markdown, no explanation.
+    prompt = f"""Analyze how well this resume matches the job description. Return ONLY a raw JSON object — no markdown, no explanation, no trailing commas.
 
 RESUME:
 {resume_text[:3000]}
@@ -36,58 +98,55 @@ RESUME:
 JOB DESCRIPTION:
 {job_description[:2000]}
 
-Return this exact JSON structure:
+Return this exact JSON structure with no trailing commas:
 {{
-  "overall": <int 0-100>,
-  "pass": <bool, true if overall >= 80>,
-  "role": "<extracted job title>",
-  "company": "<extracted company name or null>",
+  "overall": 75,
+  "pass": true,
+  "role": "Software Engineer",
+  "company": "Acme Corp",
   "cats": {{
-    "skills": <int 0-100>,
-    "title": <int 0-100>,
-    "experience": <int 0-100>,
-    "keywords": <int 0-100>
+    "skills": 80,
+    "title": 70,
+    "experience": 75,
+    "keywords": 72
   }},
-  "matched": ["keyword1", "keyword2"],
-  "missing": ["keyword1", "keyword2"],
-  "partial": ["keyword1"],
-  "tips": ["tip1", "tip2", "tip3"],
+  "matched": ["python", "fastapi"],
+  "missing": ["kubernetes", "terraform"],
+  "partial": ["docker"],
+  "tips": ["Mirror JD phrases exactly", "Add missing keywords where truthful"],
   "section_analysis": [
-    {{"name": "Summary", "note": "...", "status": "ok"}},
-    {{"name": "Skills", "note": "...", "status": "ok"}},
-    {{"name": "Experience", "note": "...", "status": "warn"}},
-    {{"name": "Keywords", "note": "...", "status": "ok"}}
+    {{"name": "Summary", "note": "Rewrite to open with JD title", "status": "warn"}},
+    {{"name": "Skills", "note": "Move matched keywords first", "status": "ok"}}
   ],
   "improvements": [
     {{
       "cat": "Keywords to add",
-      "title": "Add \\"keyword\\"",
-      "detail": "...",
+      "title": "Add \\"kubernetes\\"",
+      "detail": "Missing JD keyword. Add where truthful.",
       "where": "Skills section and relevant bullets."
     }}
   ]
 }}
 
-Improvements should cover: missing keywords (up to 8), weak sections, formatting fixes (em dashes, bold keywords), bullet structure (4-5 per role, metric-driven), and reverse-chron ordering.
-Include 8-12 total improvements."""
+Rules:
+- overall is 0-100 integer
+- pass is true if overall >= 80
+- matched: up to 16 keywords found in resume
+- missing: up to 12 keywords not found
+- improvements: 8-12 items covering keywords, section rewrites, formatting fixes, bullet structure
+- NO trailing commas anywhere in the JSON"""
 
     try:
-        response = client.messages.create(
+        response = get_client().messages.create(
             model="claude-sonnet-4-5",
-            max_tokens=2000,
-            system="You are an expert ATS analyst. Return ONLY raw JSON — no markdown fences, no explanation. Start with { and end with }.",
+            max_tokens=2500,
+            system="You are an expert ATS analyst. Return ONLY valid JSON with no trailing commas, no markdown fences, no explanation. Start with { and end with }.",
             messages=[{"role": "user", "content": prompt}]
         )
         raw = response.content[0].text.strip()
-        # Clean any markdown fences just in case
-        raw = re.sub(r"```json\s*", "", raw)
-        raw = re.sub(r"```\s*", "", raw)
-        match = re.search(r"\{[\s\S]*\}", raw)
-        if not match:
-            raise ValueError("No JSON in response")
-        return json.loads(match.group(0))
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse match analysis: {str(e)}")
+        return clean_and_parse_json(raw)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Claude API error during match: {str(e)}")
 
@@ -101,15 +160,11 @@ def generate_resume(
     selected_improvements: list[dict],
     transcripts: list[str] = []
 ) -> dict:
-    """
-    Generate a fully tailored, ATS-optimized resume.
-    Returns structured JSON ready for DOCX generation.
-    """
     client = get_client()
 
     transcript_context = ""
     if transcripts:
-        transcript_context = "\n\nINTERVIEW TRANSCRIPT CONTEXT (summary framing only — never fabricate bullets):\n" + \
+        transcript_context = "\n\nINTERVIEW TRANSCRIPT CONTEXT (summary framing only):\n" + \
             "\n\n".join([f"Transcript {i+1}:\n{t[:1500]}" for i, t in enumerate(transcripts)])
 
     improvements_list = ""
@@ -118,7 +173,7 @@ def generate_resume(
             "\n".join([f"{i+1}. {imp['title']}: {imp['detail']} ({imp['where']})"
                       for i, imp in enumerate(selected_improvements)])
 
-    prompt = f"""Generate a tailored, ATS-optimized resume. Apply all selected improvements. Return ONLY a raw JSON object.
+    prompt = f"""Generate a tailored ATS-optimized resume. Return ONLY valid JSON with no trailing commas.
 
 MASTER RESUME:
 {resume_text[:3000]}
@@ -134,59 +189,51 @@ Missing keywords: {', '.join(match_data.get('missing', []))}
 {improvements_list}
 
 ABSOLUTE RULES:
-1. Single-column only. No tables, columns, images, text boxes.
-2. NEVER use an em dash (—) anywhere. Use a comma or colon instead.
+1. Single-column only. No tables, columns, images.
+2. NEVER use em dash (—). Use comma or colon instead.
 3. Mark ALL JD-matched keywords with **double asterisks** for bold.
 4. Experience: MOST RECENT role FIRST (reverse-chronological).
-5. Every role: EXACTLY 4 to 5 bullet points — no more, no fewer.
-6. Every bullet: unique past-tense action verb + [what improved] by [X%] over [Y period] by [method].
-7. Mirror exact JD phrases — do not paraphrase.
-8. Summary opens with the exact JD job title + top 3 matched keywords.
-9. Skills section: matched JD keywords listed first.
-10. Nothing fabricated. Every bullet grounded in the master resume.
+5. Every role: EXACTLY 4 to 5 bullet points.
+6. Every bullet: action verb + metric + time period + method.
+7. Mirror exact JD phrases.
+8. Summary opens with exact JD job title + top 3 matched keywords.
+9. Nothing fabricated.
 
-REQUIRED JSON STRUCTURE:
+Return this exact JSON with no trailing commas:
 {{
   "name": "Full Name",
-  "contact": "email · linkedin.com/in/handle · City, Country",
-  "summary": "Summary with **bold** JD keywords. No em dashes.",
+  "contact": "email · linkedin · City, Country",
+  "summary": "Summary with **bold** keywords. No em dashes.",
   "skills": ["**keyword1**", "**keyword2**", "skill3"],
   "experience": [
     {{
       "role": "Job Title",
-      "company": "Company Name",
-      "years": "2020–2024",
+      "company": "Company",
+      "years": "2020-2024",
       "bullets": [
-        "**Led** [what] by [X%] over [Y months] by [method].",
-        "**Drove** [outcome] achieving [metric] within [timeframe].",
-        "**Scaled** [what] from [A] to [B] over [period].",
-        "**Reduced** [X] by [Y%] in [timeframe] through [method]."
+        "**Led** X by Y% over Z months by method.",
+        "**Drove** outcome achieving metric.",
+        "**Scaled** from A to B over period.",
+        "**Reduced** X by Y% through method."
       ]
     }}
   ],
   "education": [
-    {{"degree": "Degree Name", "institution": "University", "year": "2015"}}
+    {{"degree": "Degree", "institution": "University", "year": "2015"}}
   ],
   "ats_score": 94
-}}
-
-Experience array: most recent first. Each role: exactly 4-5 bullets."""
+}}"""
 
     try:
-        response = client.messages.create(
+        response = get_client().messages.create(
             model="claude-sonnet-4-5",
             max_tokens=4096,
-            system="You are an expert resume writer and ATS specialist. Return ONLY raw JSON — no markdown, no explanation, no fences. Strictly enforce: no em dashes, bold (**) on all JD-matched keywords, exactly 4-5 bullets per role in reverse-chronological order. Never fabricate experience.",
+            system="You are an expert resume writer. Return ONLY valid JSON with no trailing commas, no markdown fences. Never fabricate experience. No em dashes anywhere.",
             messages=[{"role": "user", "content": prompt}]
         )
         raw = response.content[0].text.strip()
-        raw = re.sub(r"```json\s*", "", raw)
-        raw = re.sub(r"```\s*", "", raw)
-        match = re.search(r"\{[\s\S]*\}", raw)
-        if not match:
-            raise ValueError("No JSON in response")
-        return json.loads(match.group(0))
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse resume JSON: {str(e)}")
+        return clean_and_parse_json(raw)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Claude API error during generation: {str(e)}")
