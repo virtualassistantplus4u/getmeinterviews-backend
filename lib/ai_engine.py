@@ -1,21 +1,20 @@
-import anthropic
+import anthropic as _sdk
 import json
 import re
 import os
 from fastapi import HTTPException
 
+_MODEL = "claude-sonnet-4-5"
 
 def get_client():
-    return anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
+    return _sdk.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 # ── Admin system prompt ───────────────────────────────────────────────────────
-ADMIN_SYSTEM_PROMPT = """You are Resume Agent, an expert ATS analyst and resume writer.
+ENGINE_SYSTEM_PROMPT = """You are Resume Agent, an expert ATS analyst and resume writer.
 Return ONLY raw valid JSON — no markdown fences, no explanation, no trailing commas.
 Start with { and end with }.
 Scoring weights: Skills match 40%, Title alignment 25%, Experience depth 20%, Keyword density 15%.
 Be precise and consistent — your scores must reflect genuine keyword and experience overlap."""
-
 
 # ── JSON parser ───────────────────────────────────────────────────────────────
 def clean_and_parse_json(raw: str) -> dict:
@@ -28,7 +27,7 @@ def clean_and_parse_json(raw: str) -> dict:
         pass
     start = raw.find("{")
     if start == -1:
-        raise HTTPException(status_code=500, detail="No JSON object found in Claude response.")
+        raise HTTPException(status_code=500, detail="No valid response object found.")
     depth = 0
     end = -1
     in_string = False
@@ -53,7 +52,7 @@ def clean_and_parse_json(raw: str) -> dict:
                 end = i + 1
                 break
     if end == -1:
-        raise HTTPException(status_code=500, detail="Could not find complete JSON in Claude response.")
+        raise HTTPException(status_code=500, detail="Could not find complete response object.")
     candidate = raw[start:end]
     try:
         return json.loads(candidate)
@@ -64,8 +63,7 @@ def clean_and_parse_json(raw: str) -> dict:
     try:
         return json.loads(candidate)
     except json.JSONDecodeError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse Claude response: {str(e)}")
-
+        raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
 
 # ── Local scoring (Free plan) ─────────────────────────────────────────────────
 def run_jd_match_local(resume_text: str, job_description: str, transcripts: list[str] = []) -> dict:
@@ -156,10 +154,8 @@ def run_jd_match_local(resume_text: str, job_description: str, transcripts: list
         "improvements": improvements
     }
 
-
-# ── Claude scoring (Pro / Unlimited / Admin plans) ────────────────────────────
-def run_jd_match_claude(resume_text: str, job_description: str, transcripts: list[str] = []) -> dict:
-    """Deep Claude-powered scoring — matches Claude chat accuracy exactly."""
+def _run_match_deep(resume_text: str, job_description: str, transcripts: list[str] = []) -> dict:
+    """Deep scoring engine for paid plans."""
     transcript_context = ""
     if transcripts:
         transcript_context = "\n\nINTERVIEW TRANSCRIPTS:\n" + "\n\n".join([f"Transcript {i+1}:\n{t[:1000]}" for i, t in enumerate(transcripts)])
@@ -221,24 +217,22 @@ Rules:
 
     try:
         response = get_client().messages.create(
-            model="claude-sonnet-4-5",
+            model=_MODEL,
             max_tokens=2500,
-            system=ADMIN_SYSTEM_PROMPT,
+            system=ENGINE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}]
         )
         return clean_and_parse_json(response.content[0].text.strip())
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Claude scoring error: {str(e)}")
-
+        raise HTTPException(status_code=500, detail=f"AI scoring error: {str(e)}")
 
 def run_jd_match(resume_text: str, job_description: str, transcripts: list[str] = [], plan: str = "free") -> dict:
     """Route to correct scoring engine based on plan."""
     if plan in ("pro", "unlimited", "admin"):
-        return run_jd_match_claude(resume_text, job_description, transcripts)
+        return _run_match_deep(resume_text, job_description, transcripts)
     return run_jd_match_local(resume_text, job_description, transcripts)
-
 
 # ── Resume Generation ─────────────────────────────────────────────────────────
 def generate_resume(resume_text: str, job_description: str, match_data: dict, selected_improvements: list[dict], transcripts: list[str] = []) -> dict:
@@ -300,7 +294,7 @@ Return this exact JSON:
 
     try:
         response = get_client().messages.create(
-            model="claude-sonnet-4-5",
+            model=_MODEL,
             max_tokens=4096,
             system="You are an expert resume writer. Return ONLY valid JSON. No markdown, no em dashes, exactly 4-5 bullets per role in reverse-chronological order. Never fabricate.",
             messages=[{"role": "user", "content": prompt}]
@@ -309,8 +303,7 @@ Return this exact JSON:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Claude generation error: {str(e)}")
-
+        raise HTTPException(status_code=500, detail=f"AI generation error: {str(e)}")
 
 # ── Admin: Gap Questions (multi-round) ────────────────────────────────────────
 def generate_gap_questions(resume_text: str, job_description: str, match_data: dict,
@@ -377,7 +370,7 @@ Set can_generate_more based on whether a hypothetical round {round_number + 1} c
 
     try:
         response = get_client().messages.create(
-            model="claude-sonnet-4-5",
+            model=_MODEL,
             max_tokens=2000,
             system="You are an expert resume coach. Return ONLY valid JSON with no trailing commas or markdown.",
             messages=[{"role": "user", "content": prompt}]
@@ -387,7 +380,6 @@ Set can_generate_more based on whether a hypothetical round {round_number + 1} c
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gap questions error: {str(e)}")
-
 
 # ── Admin: Re-analyze with Answers ────────────────────────────────────────────
 def reanalyze_with_answers(resume_text: str, job_description: str, original_match: dict, answers: list[dict]) -> dict:
@@ -439,9 +431,9 @@ Return ONLY valid JSON:
 
     try:
         response = get_client().messages.create(
-            model="claude-sonnet-4-5",
+            model=_MODEL,
             max_tokens=2500,
-            system=ADMIN_SYSTEM_PROMPT,
+            system=ENGINE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}]
         )
         return clean_and_parse_json(response.content[0].text.strip())
