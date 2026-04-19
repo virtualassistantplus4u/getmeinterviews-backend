@@ -73,7 +73,7 @@ Include 8-12 total improvements."""
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=2000,
             system="You are an expert ATS analyst. Return ONLY raw JSON — no markdown fences, no explanation. Start with { and end with }.",
             messages=[{"role": "user", "content": prompt}]
@@ -174,7 +174,7 @@ Experience array: most recent first. Each role: exactly 4-5 bullets."""
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=4096,
             system="You are an expert resume writer and ATS specialist. Return ONLY raw JSON — no markdown, no explanation, no fences. Strictly enforce: no em dashes, bold (**) on all JD-matched keywords, exactly 4-5 bullets per role in reverse-chronological order. Never fabricate experience.",
             messages=[{"role": "user", "content": prompt}]
