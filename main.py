@@ -247,11 +247,12 @@ async def match_jd(
 
     transcript_texts = [t["raw_text"] for t in (transcripts_res.data or []) if t.get("raw_text")]
 
-    # Run match analysis
+    # Run match analysis — Claude scoring for paid plans, local for free
     match_result = run_jd_match(
         resume_text=resume_res.data["raw_text"],
         job_description=body.job_description,
-        transcripts=transcript_texts
+        transcripts=transcript_texts,
+        plan=profile.get("plan", "free")
     )
 
     # Increment daily JD match counter
@@ -375,6 +376,8 @@ async def get_files(ctx: dict = Depends(get_current_user)):
 class GapQuestionsRequest(BaseModel):
     job_description: str
     match_data: dict
+    round_number: int = 1
+    previous_answers: list[dict] = []
 
 
 @app.post("/api/admin/gap-questions")
@@ -398,6 +401,8 @@ async def admin_gap_questions(
         resume_text=resume_res.data["raw_text"],
         job_description=body.job_description,
         match_data=body.match_data,
+        round_number=body.round_number,
+        previous_answers=body.previous_answers,
     )
     return result
 
