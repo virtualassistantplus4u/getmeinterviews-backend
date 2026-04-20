@@ -529,6 +529,11 @@ async def candidate_match(candidate_id: str, body: CandidateMatchRequest, ctx: d
 
     result = run_jd_match(resume_res.data[0]["raw_text"], body.job_description, transcript_texts, plan="admin")
     supabase.rpc("increment_jd_matches", {"user_id": admin_id}).execute()
+    # Increment per-candidate JD match counter
+    try:
+        supabase.rpc("increment_candidate_jd_matches", {"p_candidate_id": candidate_id}).execute()
+    except Exception:
+        pass  # non-critical, don't fail the match if this fails
     return result
 
 
