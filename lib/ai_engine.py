@@ -374,8 +374,15 @@ Return ONLY valid JSON:
   "coaching_note": "One sentence advice for the admin on how to use these answers."
 }}
 
-Generate 4-7 questions. Do NOT repeat any questions from previous rounds.
-Set can_generate_more based on whether a hypothetical round {round_number + 1} could still help."""
+STRICT RULES:
+- Generate EXACTLY 3 questions maximum — pick only the 3 highest-impact gaps
+- Each question must be SHORT and direct (1 sentence max)
+- Do NOT repeat any question from previous rounds (check previous_answers carefully)
+- If fewer than 3 meaningful new questions exist, generate fewer — do not pad
+- favorable_answer must be 1 sentence only
+- coaching_note must be 1 sentence only
+- gap_summary must be 1 sentence only
+Set can_generate_more based on whether a hypothetical round {round_number + 1} could still surface NEW useful information."""
 
     try:
         response = get_client().messages.create(
