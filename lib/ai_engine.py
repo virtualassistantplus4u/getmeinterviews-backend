@@ -450,3 +450,102 @@ Return ONLY valid JSON:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Reanalysis error: {str(e)}")
+
+
+# ── Local ATS Score (instant, no API cost) ────────────────────────────────────
+def compute_ats_score_local(resume_text: str) -> dict:
+    """
+    Analyse resume text for ATS-friendliness using heuristic signals.
+    Returns a score 0-100 and breakdown of what's passing/failing.
+    """
+    if not resume_text or len(resume_text) < 100:
+        return {"score": 0, "breakdown": [], "label": "No resume text found"}
+
+    text = resume_text
+    lower = text.lower()
+    score = 100
+    breakdown = []
+
+    # ── Check 1: Em dashes (major ATS killer) ────────────────
+    em_count = text.count("—") + text.count("\u2014")
+    if em_count > 0:
+        deduction = min(20, em_count * 4)
+        score -= deduction
+        breakdown.append({"check": "Em dashes", "status": "fail", "note": f"{em_count} em dash(es) found — ATS parsers reject these.", "deduction": deduction})
+    else:
+        breakdown.append({"check": "Em dashes", "status": "pass", "note": "No em dashes detected.", "deduction": 0})
+
+    # ── Check 2: Standard sections present ───────────────────
+    sections = ["experience", "education", "skills", "summary", "objective", "work history", "employment"]
+    found_sections = [s for s in sections if s in lower]
+    if len(found_sections) < 2:
+        score -= 15
+        breakdown.append({"check": "Section headings", "status": "fail", "note": "Missing standard sections (Experience, Education, Skills).", "deduction": 15})
+    else:
+        breakdown.append({"check": "Section headings", "status": "pass", "note": f"Found: {', '.join(found_sections[:4])}.", "deduction": 0})
+
+    # ── Check 3: Contact info present ────────────────────────
+    import re
+    has_email = bool(re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', text))
+    has_phone = bool(re.search(r'[\+\(]?\d[\d\s\-\(\)]{7,}\d', text))
+    if not has_email:
+        score -= 10
+        breakdown.append({"check": "Contact info", "status": "fail", "note": "No email address found in resume.", "deduction": 10})
+    else:
+        breakdown.append({"check": "Contact info", "status": "pass", "note": "Email address detected.", "deduction": 0})
+
+    # ── Check 4: Bullet points / structured content ───────────
+    bullet_count = text.count("•") + text.count("·") + len(re.findall(r'^\s*[-*]\s', text, re.MULTILINE))
+    if bullet_count < 5:
+        score -= 10
+        breakdown.append({"check": "Bullet points", "status": "warn", "note": f"Only {bullet_count} bullet points found. ATS expects structured bullet lists.", "deduction": 10})
+    else:
+        breakdown.append({"check": "Bullet points", "status": "pass", "note": f"{bullet_count} bullet points detected.", "deduction": 0})
+
+    # ── Check 5: Dates / work history ────────────────────────
+    date_patterns = re.findall(r'\b(20\d{2}|19\d{2})\b', text)
+    if len(date_patterns) < 2:
+        score -= 10
+        breakdown.append({"check": "Employment dates", "status": "warn", "note": "Fewer than 2 years detected — ATS may not parse work history.", "deduction": 10})
+    else:
+        breakdown.append({"check": "Employment dates", "status": "pass", "note": f"{len(date_patterns)} year references found.", "deduction": 0})
+
+    # ── Check 6: No special characters / tables ───────────────
+    table_signals = text.count("|") + text.count("+--") + text.count("│")
+    if table_signals > 5:
+        score -= 15
+        breakdown.append({"check": "Tables / columns", "status": "fail", "note": "Table characters detected — ATS systems cannot parse tables.", "deduction": 15})
+    else:
+        breakdown.append({"check": "Tables / columns", "status": "pass", "note": "No table structure detected.", "deduction": 0})
+
+    # ── Check 7: Length (too short = thin resume) ─────────────
+    word_count = len(text.split())
+    if word_count < 200:
+        score -= 10
+        breakdown.append({"check": "Resume length", "status": "warn", "note": f"Only {word_count} words — resume may be too thin for ATS.", "deduction": 10})
+    elif word_count > 1200:
+        score -= 5
+        breakdown.append({"check": "Resume length", "status": "warn", "note": f"{word_count} words — consider trimming to 1 page for junior roles.", "deduction": 5})
+    else:
+        breakdown.append({"check": "Resume length", "status": "pass", "note": f"{word_count} words — good length.", "deduction": 0})
+
+    # ── Check 8: Action verbs in bullets ─────────────────────
+    action_verbs = ["led","managed","built","developed","created","designed","implemented","delivered",
+                    "increased","reduced","improved","launched","drove","achieved","scaled","optimised",
+                    "optimized","streamlined","automated","negotiated","recruited","trained","mentored"]
+    found_verbs = [v for v in action_verbs if v in lower]
+    if len(found_verbs) < 3:
+        score -= 10
+        breakdown.append({"check": "Action verbs", "status": "warn", "note": "Few action verbs found — bullets should start with strong verbs.", "deduction": 10})
+    else:
+        breakdown.append({"check": "Action verbs", "status": "pass", "note": f"Found {len(found_verbs)} action verbs.", "deduction": 0})
+
+    score = max(0, min(100, score))
+    label = "Excellent" if score >= 90 else "Good" if score >= 75 else "Needs work" if score >= 55 else "Poor"
+
+    return {
+        "score": score,
+        "label": label,
+        "word_count": word_count,
+        "breakdown": breakdown,
+    }
