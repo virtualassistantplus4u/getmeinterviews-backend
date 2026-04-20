@@ -10,7 +10,7 @@ load_dotenv()
 
 from lib.auth import get_current_user
 from lib.text_extractor import extract_text
-from lib.ai_engine import run_jd_match, generate_resume, generate_gap_questions, reanalyze_with_answers
+from lib.ai_engine import run_jd_match, generate_resume, generate_gap_questions, reanalyze_with_answers, compute_ats_score_local
 from lib import admin_profiles as ap
 from lib.docx_generator import generate_docx
 
@@ -653,3 +653,27 @@ async def customer_applications(ctx: dict = Depends(get_current_user)):
         .execute()
 
     return res.data or []
+
+
+# ── ATS Score endpoint ────────────────────────────────────────
+@app.get("/api/resume/{resume_id}/ats-score")
+async def get_ats_score(resume_id: str, ctx: dict = Depends(get_current_user)):
+    """Compute instant local ATS score for an uploaded resume."""
+    supabase = ctx["supabase"]
+    user_id = ctx["profile"]["id"]
+
+    # Try personal resume first
+    res = supabase.table("resumes").select("raw_text")\
+        .eq("id", resume_id).eq("user_id", user_id).execute()
+
+    # If not found, try candidate resume (admin)
+    if not res.data:
+        res = supabase.table("candidate_resumes").select("raw_text")\
+            .eq("id", resume_id).eq("admin_id", user_id).execute()
+
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Resume not found.")
+
+    return compute_ats_score_local(res.data[0].get("raw_text", ""))
+
+
