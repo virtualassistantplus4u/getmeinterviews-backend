@@ -10,7 +10,7 @@ load_dotenv()
 
 from lib.auth import get_current_user
 from lib.text_extractor import extract_text
-from lib.ai_engine import run_jd_match, generate_resume, generate_gap_questions, reanalyze_with_answers, compute_ats_score_local
+from lib.ai_engine import run_jd_match, generate_resume, generate_gap_questions, reanalyze_with_answers, compute_ats_score_local, compute_ats_from_resume_json
 from lib import admin_profiles as ap
 from lib.docx_generator import generate_docx
 
@@ -321,6 +321,8 @@ async def generate(
     candidate_name = (resume_json.get("name") or "Resume").replace(" ", "_")
     role_slug = re.sub(r"[^a-zA-Z0-9]", "_", role)[:30]
     file_name = f"{candidate_name}_{role_slug}.docx"
+    # Compute real ATS score from generated resume, not Claude's self-report
+    ats_score = compute_ats_from_resume_json(resume_json)
 
     supabase.table("applications").insert({
         "user_id": user_id,
@@ -566,6 +568,8 @@ async def candidate_generate(candidate_id: str, body: CandidateGenerateRequest, 
     candidate_name = (candidate_res.data.get("full_name") or "Candidate").replace(" ", "_")
     role_slug = re.sub(r"[^a-zA-Z0-9]", "_", role)[:30]
     file_name = f"{candidate_name}_{role_slug}.docx"
+    # Compute real ATS score from generated resume
+    real_ats_score = compute_ats_from_resume_json(resume_json)
 
     ap.save_candidate_application(
         supabase, admin_id, candidate_id,
@@ -573,7 +577,7 @@ async def candidate_generate(candidate_id: str, body: CandidateGenerateRequest, 
         job_description=body.job_description,
         job_url=body.job_url or "",
         match_score=body.match_data.get("overall", 0),
-        ats_score=resume_json.get("ats_score", 0),
+        ats_score=real_ats_score,
         matched_keywords=body.match_data.get("matched", []),
         missing_keywords=body.match_data.get("missing", []),
         output_file_name=file_name,

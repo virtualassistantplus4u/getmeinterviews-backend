@@ -549,3 +549,73 @@ def compute_ats_score_local(resume_text: str) -> dict:
         "word_count": word_count,
         "breakdown": breakdown,
     }
+
+# ── Compute ATS score from generated resume JSON ──────────────────────────────
+def compute_ats_from_resume_json(resume_json: dict) -> int:
+    """
+    Compute a real ATS score from the generated resume JSON.
+    Much more accurate than Claude self-reporting.
+    """
+    score = 100
+    text_parts = []
+
+    # Reconstruct text for analysis
+    if resume_json.get("summary"):
+        text_parts.append(resume_json["summary"])
+    if resume_json.get("skills"):
+        text_parts.extend(resume_json["skills"])
+    for exp in resume_json.get("experience", []):
+        text_parts.append(exp.get("role", ""))
+        text_parts.extend(exp.get("bullets", []))
+    for edu in resume_json.get("education", []):
+        text_parts.append(edu.get("degree", ""))
+
+    full_text = " ".join(text_parts)
+
+    import re
+
+    # Check em dashes (critical)
+    em_count = full_text.count("—") + full_text.count("\u2014")
+    if em_count > 0:
+        score -= min(20, em_count * 5)
+
+    # Check bold keywords present
+    bold_count = len(re.findall(r"\*\*[^*]+\*\*", full_text))
+    if bold_count < 3:
+        score -= 10
+
+    # Check bullet count across all roles
+    total_bullets = sum(len(exp.get("bullets", [])) for exp in resume_json.get("experience", []))
+    if total_bullets < 4:
+        score -= 15
+    elif total_bullets < 8:
+        score -= 5
+
+    # Check each role has 4-5 bullets
+    for exp in resume_json.get("experience", []):
+        bullets = exp.get("bullets", [])
+        if len(bullets) < 4 or len(bullets) > 5:
+            score -= 5
+            break
+
+    # Check contact info present
+    contact = resume_json.get("contact", "")
+    if "@" not in contact:
+        score -= 10
+
+    # Check summary exists and is substantial
+    summary = resume_json.get("summary", "")
+    if len(summary) < 50:
+        score -= 10
+
+    # Check reverse-chron (first experience has recent year)
+    experience = resume_json.get("experience", [])
+    if experience:
+        first_years = experience[0].get("years", "")
+        import datetime
+        current_year = datetime.datetime.now().year
+        recent_years = [str(y) for y in range(current_year - 3, current_year + 1)]
+        if not any(y in first_years for y in recent_years):
+            score -= 5
+
+    return max(30, min(98, score))
