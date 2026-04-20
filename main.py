@@ -11,6 +11,7 @@ load_dotenv()
 from lib.auth import get_current_user
 from lib.text_extractor import extract_text
 from lib.ai_engine import run_jd_match, generate_resume, generate_gap_questions, reanalyze_with_answers
+from lib import admin_profiles as ap
 from lib.docx_generator import generate_docx
 
 app = FastAPI(title="GetMeInterviews API", version="1.0.0")
@@ -438,3 +439,217 @@ async def admin_reanalyze(
         answers=body.answers,
     )
     return result
+
+
+# ══════════════════════════════════════════════════════════════
+# ADMIN: CANDIDATE PROFILE MANAGEMENT
+# ══════════════════════════════════════════════════════════════
+
+class CreateCandidateRequest(BaseModel):
+    full_name: str
+    email: str | None = None
+    notes: str | None = None
+
+
+@app.get("/api/admin/candidates")
+async def list_candidates(ctx: dict = Depends(get_current_user)):
+    ap.require_admin(ctx["profile"])
+    return ap.list_candidate_profiles(ctx["supabase"], ctx["profile"]["id"])
+
+
+@app.post("/api/admin/candidates")
+async def create_candidate(body: CreateCandidateRequest, ctx: dict = Depends(get_current_user)):
+    ap.require_admin(ctx["profile"])
+    return ap.create_candidate_profile(ctx["supabase"], ctx["profile"]["id"], body.full_name, body.email, body.notes)
+
+
+@app.delete("/api/admin/candidates/{candidate_id}")
+async def delete_candidate(candidate_id: str, ctx: dict = Depends(get_current_user)):
+    ap.require_admin(ctx["profile"])
+    return ap.delete_candidate_profile(ctx["supabase"], ctx["profile"]["id"], candidate_id)
+
+
+# ── Candidate Files ───────────────────────────────────────────
+
+@app.get("/api/admin/candidates/{candidate_id}/files")
+async def get_candidate_files(candidate_id: str, ctx: dict = Depends(get_current_user)):
+    ap.require_admin(ctx["profile"])
+    return ap.get_candidate_files(ctx["supabase"], ctx["profile"]["id"], candidate_id)
+
+
+@app.post("/api/admin/candidates/{candidate_id}/resume")
+async def upload_candidate_resume(candidate_id: str, file: UploadFile = File(...), ctx: dict = Depends(get_current_user)):
+    ap.require_admin(ctx["profile"])
+    content = await file.read()
+    return await ap.upload_candidate_resume(ctx["supabase"], ctx["profile"]["id"], candidate_id, content, file.filename)
+
+
+@app.delete("/api/admin/candidates/{candidate_id}/resume/{resume_id}")
+async def delete_candidate_resume(candidate_id: str, resume_id: str, ctx: dict = Depends(get_current_user)):
+    ap.require_admin(ctx["profile"])
+    return ap.delete_candidate_resume(ctx["supabase"], ctx["profile"]["id"], resume_id)
+
+
+@app.post("/api/admin/candidates/{candidate_id}/transcript")
+async def upload_candidate_transcript(candidate_id: str, file: UploadFile = File(...), ctx: dict = Depends(get_current_user)):
+    ap.require_admin(ctx["profile"])
+    content = await file.read()
+    return await ap.upload_candidate_transcript(ctx["supabase"], ctx["profile"]["id"], candidate_id, content, file.filename)
+
+
+@app.delete("/api/admin/candidates/{candidate_id}/transcript/{transcript_id}")
+async def delete_candidate_transcript(candidate_id: str, transcript_id: str, ctx: dict = Depends(get_current_user)):
+    ap.require_admin(ctx["profile"])
+    return ap.delete_candidate_transcript(ctx["supabase"], ctx["profile"]["id"], transcript_id)
+
+
+# ── Candidate Match + Generate ────────────────────────────────
+
+class CandidateMatchRequest(BaseModel):
+    job_description: str
+    job_url: str | None = None
+
+
+@app.post("/api/admin/candidates/{candidate_id}/match")
+async def candidate_match(candidate_id: str, body: CandidateMatchRequest, ctx: dict = Depends(get_current_user)):
+    ap.require_admin(ctx["profile"])
+    supabase = ctx["supabase"]
+    admin_id = ctx["profile"]["id"]
+
+    resume_res = supabase.table("candidate_resumes").select("raw_text")\
+        .eq("candidate_id", candidate_id).eq("admin_id", admin_id).execute()
+    if not resume_res.data:
+        raise HTTPException(status_code=404, detail="No resume found for this candidate.")
+
+    transcripts_res = supabase.table("candidate_transcripts").select("raw_text")\
+        .eq("candidate_id", candidate_id).eq("admin_id", admin_id).execute()
+    transcript_texts = [t["raw_text"] for t in (transcripts_res.data or []) if t.get("raw_text")]
+
+    result = run_jd_match(resume_res.data[0]["raw_text"], body.job_description, transcript_texts, plan="admin")
+    supabase.rpc("increment_jd_matches", {"user_id": admin_id}).execute()
+    return result
+
+
+class CandidateGenerateRequest(BaseModel):
+    job_description: str
+    job_url: str | None = None
+    match_data: dict
+    selected_improvements: list[dict]
+
+
+@app.post("/api/admin/candidates/{candidate_id}/generate")
+async def candidate_generate(candidate_id: str, body: CandidateGenerateRequest, ctx: dict = Depends(get_current_user)):
+    ap.require_admin(ctx["profile"])
+    supabase = ctx["supabase"]
+    admin_id = ctx["profile"]["id"]
+
+    resume_res = supabase.table("candidate_resumes").select("raw_text")\
+        .eq("candidate_id", candidate_id).eq("admin_id", admin_id).execute()
+    if not resume_res.data:
+        raise HTTPException(status_code=404, detail="No resume found for this candidate.")
+
+    transcripts_res = supabase.table("candidate_transcripts").select("raw_text")\
+        .eq("candidate_id", candidate_id).eq("admin_id", admin_id).execute()
+    transcript_texts = [t["raw_text"] for t in (transcripts_res.data or []) if t.get("raw_text")]
+
+    resume_json = generate_resume(
+        resume_res.data[0]["raw_text"], body.job_description,
+        body.match_data, body.selected_improvements, transcript_texts
+    )
+
+    from lib.docx_generator import generate_docx
+    docx_bytes = generate_docx(resume_json)
+
+    role = body.match_data.get("role", "Role")
+    company = body.match_data.get("company")
+    candidate_res = supabase.table("candidate_profiles").select("full_name").eq("id", candidate_id).single().execute()
+    candidate_name = (candidate_res.data.get("full_name") or "Candidate").replace(" ", "_")
+    role_slug = re.sub(r"[^a-zA-Z0-9]", "_", role)[:30]
+    file_name = f"{candidate_name}_{role_slug}.docx"
+
+    ap.save_candidate_application(
+        supabase, admin_id, candidate_id,
+        job_title=role, company=company,
+        job_description=body.job_description,
+        job_url=body.job_url or "",
+        match_score=body.match_data.get("overall", 0),
+        ats_score=resume_json.get("ats_score", 0),
+        matched_keywords=body.match_data.get("matched", []),
+        missing_keywords=body.match_data.get("missing", []),
+        output_file_name=file_name,
+        output_file_data=docx_bytes,
+        improvements_applied=len(body.selected_improvements),
+    )
+
+    return Response(
+        content=docx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{file_name}"'}
+    )
+
+
+@app.get("/api/admin/candidates/{candidate_id}/applications")
+async def list_candidate_applications(candidate_id: str, ctx: dict = Depends(get_current_user)):
+    ap.require_admin(ctx["profile"])
+    return ap.list_candidate_applications(ctx["supabase"], ctx["profile"]["id"], candidate_id)
+
+
+# ── Download generated resume ─────────────────────────────────
+
+@app.get("/api/admin/applications/{application_id}/download")
+async def download_application_resume(application_id: str, ctx: dict = Depends(get_current_user)):
+    supabase = ctx["supabase"]
+    user_id = ctx["profile"]["id"]
+    plan = ctx["profile"].get("plan")
+
+    # Admin can download any of their applications
+    if plan == "admin":
+        res = supabase.table("candidate_applications").select("output_file_data, output_file_name")\
+            .eq("id", application_id).eq("admin_id", user_id).single().execute()
+    else:
+        # Customer can download their own linked applications
+        profile_res = supabase.table("profiles").select("linked_candidate_id").eq("id", user_id).single().execute()
+        linked = profile_res.data.get("linked_candidate_id") if profile_res.data else None
+        if not linked:
+            raise HTTPException(status_code=403, detail="No linked candidate profile.")
+        res = supabase.table("candidate_applications").select("output_file_data, output_file_name")\
+            .eq("id", application_id).eq("candidate_id", linked).eq("visible_to_customer", True).single().execute()
+
+    if not res.data or not res.data.get("output_file_data"):
+        raise HTTPException(status_code=404, detail="Resume file not found.")
+
+    file_bytes = bytes.fromhex(res.data["output_file_data"])
+    file_name = res.data.get("output_file_name", "resume.docx")
+
+    return Response(
+        content=file_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{file_name}"'}
+    )
+
+
+# ══════════════════════════════════════════════════════════════
+# CUSTOMER PORTAL
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/api/customer/applications")
+async def customer_applications(ctx: dict = Depends(get_current_user)):
+    supabase = ctx["supabase"]
+    user_id = ctx["profile"]["id"]
+
+    profile_res = supabase.table("profiles").select("linked_candidate_id, is_customer").eq("id", user_id).single().execute()
+    if not profile_res.data or not profile_res.data.get("is_customer"):
+        raise HTTPException(status_code=403, detail="Customer account required.")
+
+    linked = profile_res.data.get("linked_candidate_id")
+    if not linked:
+        raise HTTPException(status_code=404, detail="No candidate profile linked to your account.")
+
+    res = supabase.table("candidate_applications")\
+        .select("id, job_title, company, job_url, match_score, ats_score, output_file_name, improvements_applied, created_at")\
+        .eq("candidate_id", linked)\
+        .eq("visible_to_customer", True)\
+        .order("created_at", desc=True)\
+        .execute()
+
+    return res.data or []
